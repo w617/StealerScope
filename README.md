@@ -25,3 +25,6 @@ domaindetect.txt: Lists detected domains.
 processes.txt: Lists running processes.
 software.txt: Lists installed software.
 system.txt: Contains system information (key-value pairs).
+
+# Demo
+![StealerScope Demo](StealerScopeDemo.gif)
