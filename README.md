@@ -18,6 +18,7 @@ Generate Reports: Click "📄 Generate Report" to create a PDF report, or export
 Settings: Adjust application settings (e.g., theme, alerts) via the "⚙️ Settings" menu.
 
 #Supported Log File Formats
+
 all passwords.txt: Contains credentials (URL, username, password).
 brute.txt: Contains brute-force password attempts.
 domaindetect.txt: Lists detected domains.
