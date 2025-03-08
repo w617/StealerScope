@@ -1,9 +1,61 @@
+# Python cache and compiled files
 __pycache__/
 *.py[cod]
+*.pyo
+*.pyd
+
+# Virtual Environments
+env/
+venv/
+ENV/
+env/
+venv/
+
+# Logs and databases
 *.log
+*.sqlite
+*.db
+
+# Generated reports and exported data
 *.pdf
 *.json
 *.html
+
+# Sensitive or local configuration files
+*.ini
 *.env
+
+# Operating System Files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE-specific files
 .vscode/
 .idea/
+*.sublime-project
+*.sublime-workspace
+*.iml
+
+# PyInstaller builds (if used)
+build/
+dist/
+*.spec
+
+# Coverage report files (if running tests)
+.coverage
+coverage.xml
+htmlcov/
+
+# Virtual environments
+venv/
+env/
+venv/
+ENV/
+
+# Logs and databases
+*.log
+logs/
+*.bak
+*.sqlite3
+*.db
