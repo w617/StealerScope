@@ -8,9 +8,13 @@ Report Generation: Creates PDF report
 
 #Usage
 Import Logs: Use the "📂 Import Logs" button to select a folder containing log files (e.g., all passwords.txt, brute.txt, etc.).
+
 Parse Logs: Click "🔍 Parse Logs" to analyze the imported logs. Progress will be displayed in the log viewer.
+
 View Data: Use "🔎 View Parsed Data" to explore the parsed data in a tree view with filtering options.
+
 Generate Reports: Click "📄 Generate Report" to create a PDF report, or export data as JSON with "📜 Export Data".
+
 Settings: Adjust application settings (e.g., theme, alerts) via the "⚙️ Settings" menu.
 
 #Supported Log File Formats
