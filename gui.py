@@ -1,6 +1,7 @@
 import customtkinter as ctk
 from tkinter import filedialog, messagebox, Toplevel
 import threading
+import queue
 import logging
 from settings_manager import SettingsManager
 from tkinter import ttk
@@ -38,9 +39,8 @@ class Tooltip:
             self.id = None
 
     def showtip(self, event=None):
-        x, y, cx, cy = self.widget.bbox("insert")
-        x += self.widget.winfo_rootx() + 25
-        y += self.widget.winfo_rooty() + 20
+        x = self.widget.winfo_rootx() + 25
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 5
         self.tw = tk.Toplevel(self.widget)
         self.tw.wm_overrideredirect(True)
         self.tw.wm_geometry("+%d+%d" % (x, y))
@@ -126,7 +126,7 @@ class ParsedDataViewer(Toplevel):
                 filtered_entries = [(k, v) for k, v in entries.items() if term in k.lower() or term in str(v).lower()]
             if filtered_entries:
                 parent_id = self.tree.insert("", "end", text=category, values=("",))
-                if isinstance(filtered_entries, list):
+                if isinstance(entries, list):
                     for text in filtered_entries:
                         self.tree.insert(parent_id, "end", text="", values=(text,))
                 else:
@@ -199,6 +199,7 @@ class StealerScopeGUI(ctk.CTk):
         self.grid_columnconfigure(0, weight=1)
         
         self.insert_log("🔹 Log output will be displayed here...")
+        self._parsing = False
         self.bind_shortcuts()
 
     def bind_shortcuts(self):
@@ -345,50 +346,60 @@ class StealerScopeGUI(ctk.CTk):
             self.insert_log(f"📂 Log folder set to: {folder}")
     
     def run_log_parser(self):
+        if self._parsing:
+            return
+        from stream_log_parser import StreamLogParser
+        log_folder = self.settings_manager.get("PATHS", "log_folder", fallback="logs/")
+        self._parsing = True
+        # A failed/new import must never leave the previous case available for export.
+        if hasattr(self, "parsed_data"):
+            del self.parsed_data
+        for button in (self.parse_button, self.import_logs_button, self.settings_button):
+            button.configure(state="disabled")
+        self.insert_log(f"Starting log parsing from folder: {log_folder}")
+        self.status_var.set("Parsing logs...")
+        progress = ctk.CTkProgressBar(self, width=280, mode="indeterminate")
+        progress.grid(row=3, column=0, pady=5)
+        progress.start()
+        results = queue.Queue()
+
         def task():
-            from stream_log_parser import StreamLogParser
-            log_folder = self.settings_manager.get("PATHS", "log_folder", fallback="logs/")
-            self.insert_log(f"🔍 Starting log parsing from folder: {log_folder}")
-            self.status_var.set("Parsing logs...")
-            progress = ctk.CTkProgressBar(self, width=280)
-            progress.grid(row=3, column=0, pady=5)
-            progress.start()
-            parser = StreamLogParser(log_folder)
             try:
-                parsed_data = parser.parse_logs_stream()
-                self.parsed_data = parsed_data
-                progress.stop()
-                progress.destroy()
-                self.insert_log("✅ Log parsing completed successfully.\n")
-                self.status_var.set("Parsing complete")
-                for cat in ["credentials", "brute_passwords", "detected_domains", "processes", "installed_software", "system_info"]:
-                    self.insert_log(f"===== {cat.upper()} =====")
-                    if isinstance(parsed_data[cat], list):
-                        self.insert_log(f"Total items: {len(parsed_data[cat])}")
-                        for i, item in enumerate(parsed_data[cat], start=1):
-                            if cat == "credentials":
-                                text_line = f"{i}. URL: {item.get('url', '')} | USER: {item.get('username', '')} | PASS: {item.get('password', '')}"
-                            else:
-                                text_line = f"{i}. {item}"
-                            self.insert_log(text_line)
-                    elif isinstance(parsed_data[cat], dict):
-                        self.insert_log(f"Total entries: {len(parsed_data[cat])}")
-                        for key, value in parsed_data[cat].items():
-                            self.insert_log(f"{key}: {value}")
-                    self.insert_log("")
-                # Optional: Insert parsed data into database
-                # from db_manager import DBManager
-                # db = DBManager()
-                # db.insert_parsed_data(parsed_data)
-                # db.close()
-            except Exception as e:
-                progress.stop()
-                progress.destroy()
-                self.insert_log(f"❌ Error during log parsing: {e}")
+                results.put((StreamLogParser(log_folder).parse_logs_stream(), None))
+            except Exception as error:
+                results.put((None, str(error)))
+
+        def poll():
+            try:
+                parsed_data, error = results.get_nowait()
+            except queue.Empty:
+                self.after(100, poll)
+                return
+            progress.stop()
+            progress.destroy()
+            self._parsing = False
+            for button in (self.parse_button, self.import_logs_button, self.settings_button):
+                button.configure(state="normal")
+            if error:
                 self.status_var.set("Parsing failed")
-                messagebox.showerror("Parsing Error", f"An error occurred: {e}")
-        threading.Thread(target=task).start()
-    
+                self.insert_log(f"Error during log parsing: {error}")
+                messagebox.showerror("Parsing Error", error)
+                return
+            self.parsed_data = parsed_data
+            warning_count = len(parsed_data["warnings"])
+            self.status_var.set(f"Parsing complete — {warning_count} warning(s)")
+            for category in ("credentials", "brute_passwords", "detected_domains",
+                             "processes", "installed_software", "system_records", "source_files"):
+                self.insert_log(f"{category.replace('_', ' ').title()}: {len(parsed_data[category])}")
+            for warning in parsed_data["warnings"][:20]:
+                self.insert_log(f"Warning: {warning['source']}: {warning['message']}")
+            if warning_count > 20:
+                self.insert_log("Additional warnings are available in View Parsed Data and exports.")
+            self.insert_log("Open View Parsed Data to inspect records and source information.")
+
+        threading.Thread(target=task, daemon=True).start()
+        self.after(100, poll)
+
     def generate_report(self):
         if not hasattr(self, 'parsed_data'):
             self.insert_log("❌ No parsed data available. Please run log parser first.")
@@ -416,7 +427,11 @@ class StealerScopeGUI(ctk.CTk):
         self.insert_log("📜 Exporting parsed data to JSON...")
         try:
             import json
-            output_file = "exported_parsed_data.json"
+            output_file = filedialog.asksaveasfilename(
+                defaultextension=".json", filetypes=[("JSON files", "*.json")],
+                title="Export Parsed Data As")
+            if not output_file:
+                return
             with open(output_file, "w", encoding="utf-8") as f:
                 json.dump(self.parsed_data, f, indent=4)
             self.insert_log(f"✅ Data exported successfully to: {output_file}")
