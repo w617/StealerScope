@@ -79,7 +79,7 @@ class ParserTests(unittest.TestCase):
         self.write("brute.txt", "x")
         with patch.object(self.parser, "stream_read_lines", side_effect=PermissionError("denied")):
             data = self.parser.parse_logs_stream()
-        self.assertEqual(data["source_files"][0]["status"], "error")
+        self.assertEqual(data["source_files"][0]["status"], "failed")
         self.assertIn("denied", data["warnings"][0]["message"])
 
     def test_legacy_entry_point_and_json_export(self):

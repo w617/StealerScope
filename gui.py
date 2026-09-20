@@ -389,8 +389,17 @@ class StealerScopeGUI(ctk.CTk):
             warning_count = len(parsed_data["warnings"])
             self.status_var.set(f"Parsing complete — {warning_count} warning(s)")
             for category in ("credentials", "brute_passwords", "detected_domains",
-                             "processes", "installed_software", "system_records", "source_files"):
+                             "processes", "installed_software", "system_records", "cookies", "source_files"):
                 self.insert_log(f"{category.replace('_', ' ').title()}: {len(parsed_data[category])}")
+            summary = parsed_data["import_summary"]
+            self.insert_log("Import coverage: " + ", ".join(
+                f"{key}: {summary[key]}" for key in
+                ("files_enumerated", "parsed", "partial", "unsupported", "skipped", "failed")))
+            assessment = parsed_data["family_assessment"]
+            self.insert_log(f"Malware family: {assessment['status']} (no confirmed attribution)")
+            if assessment["candidates"]:
+                self.insert_log("Unverified labels: " + ", ".join(assessment["candidates"]))
+            self.insert_log("View source_files for per-file formats, confidence, and supporting indicators.")
             for warning in parsed_data["warnings"][:20]:
                 self.insert_log(f"Warning: {warning['source']}: {warning['message']}")
             if warning_count > 20:

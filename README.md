@@ -84,3 +84,59 @@ Run the regression suite without GUI dependencies:
 ```sh
 python -m unittest discover -s tests -v
 ```
+
+## Content detection and import coverage
+
+StealerScope separates **log format identification** from **malware family
+attribution**. A high-confidence format match means the sampled structure fits a
+parser; it is not a probability that a particular malware family generated it.
+
+| Detected format | Evidence | Parser |
+| --- | --- | --- |
+| Credential blocks | URL/Host, User/Username/Login, Pass/Password labels | Labeled records, optional browser/software |
+| Credential tables | Explicit credential column headers | CSV, TSV, or semicolon-delimited; quoted fields supported |
+| Netscape cookies | Seven tab-separated fields with valid flag/expiry shapes | Includes HttpOnly, source file, and line |
+| System information | At least two recognized system field names | Key/value fields grouped by source |
+| Legacy line lists | Known filename only (low confidence) | Domains, processes, software, brute-password lists |
+
+Content detection runs before filename fallbacks, so renamed files can be parsed.
+Detection examines at most the first **65,536 bytes per file** and records whether
+the sample was truncated. The selected parser then reads the full file. A format
+whose recognizable content occurs only beyond that sample may remain unsupported.
+Conflicting format matches are marked ambiguous and left for manual review.
+Binary files, unknown formats, archives, and headerless colon-separated credentials
+are inventoried as unsupported rather than guessed. Symbolic links and special
+files are skipped without opening them; linked directories are not traversed.
+
+Each `source_files` entry contains a status, record count, warning count, and,
+when available, detection evidence, sample size, and confidence. The
+`import_summary` reconciles enumerated files across `parsed`, `partial`,
+`unsupported`, `skipped`, and `failed`. `partial` means a recognized parser
+reported warnings or extracted zero records; a failed parser may retain records
+read before the failure. These statuses describe parser outcomes, not proof that
+every artifact in a file was understood. Directory traversal errors set
+`enumeration_complete` to false because inaccessible contents cannot be counted.
+Intentionally skipped linked directories have their own count.
+
+The GUI shows coverage totals and family assessment; **View Parsed Data** and
+JSON/PDF exports include the detailed inventory and evidence. Cookie values, like
+passwords, remain sensitive plaintext in detailed views and exports. The optional
+legacy SQLite helper does not persist the new cookies, coverage, or detection
+metadata; use JSON to preserve the complete analysis.
+
+### Family attribution limits
+
+`family_assessment` currently uses these outcomes:
+
+- `unknown`: no supported family evidence.
+- `unverified`: one candidate explicitly named in a `Family:`, `Malware:`, or
+  `Stealer:` label. Confidence is low because the label may be fabricated.
+- `ambiguous`: conflicting candidates, possibly from mixed-source imports.
+
+The `family` field stays null: **there are no independently validated malware
+family signatures in this release**. Family names in paths, URLs, usernames, or
+passwords are not attribution rules. Each explicit claim records its source and
+line. Repeated claims do not increase confidence. Real-world family accuracy
+cannot be claimed from the synthetic regression fixtures. An independently
+labeled, lawfully held sample corpus is required before adding and validating
+stronger family-specific signatures.

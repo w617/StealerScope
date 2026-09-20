@@ -1,5 +1,8 @@
 """Offline, line-oriented parsing of infostealer logs for analysis."""
-import codecs
+import csv
+import stat
+from collections import Counter
+from log_detection import detect_file, family_assessment, text_encoding, LABELS
 import json
 import os
 import re
@@ -12,9 +15,7 @@ class StreamLogParser:
         "processes.txt": "processes",
         "software.txt": "installed_software",
     }
-    LABELS = {"url": "url", "user": "username", "username": "username",
-              "login": "username", "pass": "password", "password": "password",
-              "soft": "soft", "browser": "soft"}
+    LABELS = LABELS
 
     def __init__(self, log_folder):
         self.log_folder = os.fspath(log_folder)
@@ -24,7 +25,7 @@ class StreamLogParser:
         self.parsed_data = {key: [] for key in
                             ("credentials", "brute_passwords", "detected_domains",
                              "processes", "installed_software", "system_records",
-                             "warnings", "source_files")}
+                             "warnings", "source_files", "cookies")}
         self.parsed_data["system_info"] = {}
 
     def _warning(self, source, message, line=None):
@@ -37,12 +38,7 @@ class StreamLogParser:
         # BOM detection avoids silently stripping UTF-16 bytes or UTF-8 BOMs.
         with open(file_path, "rb") as raw:
             prefix = raw.read(4)
-        if prefix.startswith((codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE)):
-            encoding = "utf-32"
-        elif prefix.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
-            encoding = "utf-16"
-        else:
-            encoding = "utf-8-sig"
+        encoding = text_encoding(prefix)
         with open(file_path, encoding=encoding, errors="replace") as stream:
             warned = False
             for number, line in enumerate(stream, 1):
@@ -55,41 +51,118 @@ class StreamLogParser:
         self._reset()
         if not os.path.isdir(self.log_folder):
             raise NotADirectoryError(f"Log folder is not a directory: {self.log_folder}")
+        inventory = self.parsed_data["source_files"]
+        enumeration_errors = []
         def walk_error(error):
+            enumeration_errors.append(str(error))
             self._warning(error.filename or self.log_folder, str(error))
         for root, directories, files in os.walk(self.log_folder, onerror=walk_error):
             directories.sort()
-            for filename in sorted(files):
-                name = filename.lower()
-                if name not in self.CATEGORIES and name not in ("all passwords.txt", "passwords.txt", "system.txt"):
-                    continue
-                path = os.path.join(root, filename)
+            for directory in directories[:]:
+                path = os.path.join(root, directory)
                 if os.path.islink(path):
-                    self._warning(path, "Skipped symbolic link.")
-                    continue
-                source = {"source": path, "status": "parsed"}
+                    directories.remove(directory)
+                    inventory.append({"source": path, "entry_type": "directory", "status": "skipped",
+                                      "reason": "Symbolic link directory not followed.", "records_parsed": 0})
+            for filename in sorted(files):
+                path = os.path.join(root, filename)
+                source = {"source": path, "entry_type": "file", "status": "unsupported", "records_parsed": 0}
+                inventory.append(source)
+                warnings_before = len(self.parsed_data["warnings"])
                 try:
-                    if name in ("all passwords.txt", "passwords.txt"):
-                        self.parsed_data["credentials"].extend(self.stream_parse_credentials(path))
-                    elif name == "system.txt":
+                    mode = os.lstat(path).st_mode
+                    if not stat.S_ISREG(mode):
+                        source.update(status="skipped", reason="Symbolic link or non-regular file not opened.")
+                        continue
+                    detection = detect_file(path)
+                    source["detection"] = detection
+                    format_name = detection["format"]
+                    if format_name in ("unknown", "ambiguous", "binary"):
+                        source["reason"] = detection.get("reason", "No supported parser.")
+                        continue
+                    if format_name == "credential_blocks":
+                        records, target = self.stream_parse_credentials(path), "credentials"
+                    elif format_name == "credential_table":
+                        records, target = self.stream_parse_credential_table(path, detection["delimiter"]), "credentials"
+                    elif format_name == "netscape_cookies":
+                        records, target = self.stream_parse_cookies(path), "cookies"
+                    elif format_name == "system_key_values":
                         info = self.stream_parse_system_info(path)
-                        self.parsed_data["system_records"].append({"source": path, "fields": info})
+                        records = [{"source": path, "fields": info}] if info else []
+                        target = "system_records"
                     else:
-                        values = self.stream_read_lines(path)
-                        if name == "domaindetect.txt":
-                            values = (value.lower() for value in values)
-                        self.parsed_data[self.CATEGORIES[name]].extend(values)
-                except OSError as error:
-                    source["status"] = "error"
+                        target = self.CATEGORIES[filename.lower()]
+                        records = self.stream_read_lines(path)
+                        if target == "detected_domains":
+                            records = (value.lower() for value in records)
+                    for record in records:
+                        self.parsed_data[target].append(record)
+                        source["records_parsed"] += 1
+                    if not source["records_parsed"]:
+                        self._warning(path, "Recognized format or filename but no records were parsed.")
+                    source["status"] = "partial" if len(self.parsed_data["warnings"]) > warnings_before else "parsed"
+                except (OSError, csv.Error, UnicodeError) as error:
+                    source["status"] = "failed"
+                    source["reason"] = str(error)
                     self._warning(path, str(error))
-                self.parsed_data["source_files"].append(source)
+                finally:
+                    source["warning_count"] = len(self.parsed_data["warnings"]) - warnings_before
         records = self.parsed_data["system_records"]
-        # Preserve the legacy single-system view only when it is unambiguous.
         if len(records) == 1:
             self.parsed_data["system_info"] = dict(records[0]["fields"])
-        if not self.parsed_data["source_files"]:
-            self._warning(self.log_folder, "No supported log files found.")
+        counts = Counter(item["status"] for item in inventory if item["entry_type"] == "file")
+        self.parsed_data["import_summary"] = {
+            "files_enumerated": sum(counts.values()),
+            **{status: counts[status] for status in ("parsed", "partial", "unsupported", "skipped", "failed")},
+            "directories_skipped": sum(item["entry_type"] == "directory" for item in inventory),
+            "enumeration_complete": not enumeration_errors,
+            "enumeration_errors": enumeration_errors,
+            "detection_sample_limit_bytes": 65536,
+        }
+        claims = [e for item in inventory for e in item.get("detection", {}).get("family_assessment", {}).get("evidence", [])]
+        self.parsed_data["family_assessment"] = family_assessment(claims)
+        if not counts["parsed"] and not counts["partial"]:
+            self._warning(self.log_folder, "No supported log files found or successfully parsed.")
         return self.parsed_data
+
+    def stream_parse_credential_table(self, file_path, delimiter):
+        # Preserve original newlines inside quoted fields. _lines supplies decoding
+        # warnings while csv.reader handles quoted delimiters and multiline records.
+        reader = csv.reader((line + "\n" for _, line in self._lines(file_path)), delimiter=delimiter, strict=True)
+        header = next(reader, [])
+        fields = [self.LABELS.get(value.strip().lower()) for value in header]
+        required = {"url", "username", "password"}
+        if not required.issubset(fields) or any(fields.count(key) != 1 for key in required):
+            self._warning(file_path, "Missing or duplicate credential table columns.", 1)
+            return
+        while True:
+            start_line = reader.line_num + 1
+            try:
+                row = next(reader)
+            except StopIteration:
+                return
+            if not row:
+                continue
+            if len(row) != len(header):
+                self._warning(file_path, "Credential table row has an unexpected column count.", start_line)
+                continue
+            record = {key: value for key, value in zip(fields, row) if key}
+            yield dict(record, source=os.fspath(file_path), source_line=start_line)
+
+    def stream_parse_cookies(self, file_path):
+        for number, line in self._lines(file_path):
+            http_only = line.startswith("#HttpOnly_")
+            if http_only:
+                line = line[len("#HttpOnly_"):]
+            elif not line.strip() or line.startswith("#"):
+                continue
+            parts = line.split("\t")
+            if len(parts) != 7 or parts[1] not in ("TRUE", "FALSE") or parts[3] not in ("TRUE", "FALSE") or not parts[4].isdigit():
+                self._warning(file_path, "Malformed Netscape cookie record.", number)
+                continue
+            yield {"domain": parts[0], "include_subdomains": parts[1] == "TRUE", "path": parts[2],
+                   "secure": parts[3] == "TRUE", "expires_epoch": parts[4], "name": parts[5],
+                   "value": parts[6], "http_only": http_only, "source": os.fspath(file_path), "source_line": number}
 
     def stream_read_lines(self, file_path):
         for _, line in self._lines(file_path):
