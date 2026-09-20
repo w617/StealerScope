@@ -1,377 +1,355 @@
-import customtkinter as ctk
-from tkinter import filedialog, messagebox, simpledialog, Toplevel
-import threading
+import json
 import queue
-import logging
-from settings_manager import SettingsManager
-from tkinter import ttk
+import threading
 import tkinter as tk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
-# -------------------------------
-# Tooltip Class for Enhanced UX
-# -------------------------------
+import customtkinter as ctk
+
+from settings_manager import SettingsManager
+
+
+COLORS = {
+    "nav": "#101828", "nav_hover": "#1d2939", "blue": "#1570ef",
+    "green": "#079455", "amber": "#dc6803", "red": "#d92d20",
+    "surface": "#ffffff", "canvas": "#f2f4f7", "border": "#e4e7ec",
+    "text": "#101828", "muted": "#667085",
+}
+
+
 class Tooltip:
-    def __init__(self, widget, text="widget info", waittime=500, wraplength=180):
-        self.widget = widget
-        self.text = text
-        self.waittime = waittime
-        self.wraplength = wraplength
-        self.id = None
-        self.tw = None
-        self.widget.bind("<Enter>", self._enter)
-        self.widget.bind("<Leave>", self._leave)
-        self.widget.bind("<ButtonPress>", self._leave)
+    def __init__(self, widget, text="", waittime=500):
+        self.widget, self.text, self.waittime = widget, text, waittime
+        self.after_id = self.tip = None
+        widget.bind("<Enter>", self._schedule)
+        widget.bind("<Leave>", self._hide)
 
-    def _enter(self, event=None):
-        self.schedule()
+    def _schedule(self, _event=None):
+        self._hide()
+        self.after_id = self.widget.after(self.waittime, self._show)
 
-    def _leave(self, event=None):
-        self.unschedule()
-        self.hidetip()
+    def _show(self):
+        self.tip = tk.Toplevel(self.widget)
+        self.tip.wm_overrideredirect(True)
+        self.tip.wm_geometry(f"+{self.widget.winfo_rootx()+20}+{self.widget.winfo_rooty()+self.widget.winfo_height()+5}")
+        tk.Label(self.tip, text=self.text, background="#fffae6", relief="solid",
+                 borderwidth=1, padx=7, pady=4).pack()
 
-    def schedule(self):
-        self.unschedule()
-        self.id = self.widget.after(self.waittime, self.showtip)
+    def _hide(self, _event=None):
+        if self.after_id:
+            self.widget.after_cancel(self.after_id)
+            self.after_id = None
+        if self.tip:
+            self.tip.destroy()
+            self.tip = None
 
-    def unschedule(self):
-        if self.id:
-            self.widget.after_cancel(self.id)
-            self.id = None
 
-    def showtip(self, event=None):
-        x = self.widget.winfo_rootx() + 25
-        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 5
-        self.tw = tk.Toplevel(self.widget)
-        self.tw.wm_overrideredirect(True)
-        self.tw.wm_geometry("+%d+%d" % (x, y))
-        label = tk.Label(self.tw, text=self.text, justify='left', background="#ffffe0",
-                         relief='solid', borderwidth=1, wraplength=self.wraplength)
-        label.pack(ipadx=1)
+class StealerScopeGUI(ctk.CTk):
+    NAV_ITEMS = (
+        ("overview", "Overview"), ("credentials", "Credentials"),
+        ("cookies", "Cookies"), ("system_records", "Systems"),
+        ("host_artifacts", "Host Artifacts"), ("source_files", "Files"),
+        ("warnings", "Warnings"),
+    )
 
-    def hidetip(self):
-        if self.tw:
-            self.tw.destroy()
-        self.tw = None
+    def __init__(self):
+        super().__init__()
+        self.title("StealerScope — Infostealer Log Analyzer")
+        self.geometry("1280x820")
+        self.minsize(1040, 680)
+        ctk.set_appearance_mode("light")
+        ctk.set_default_color_theme("blue")
+        self.configure(fg_color=COLORS["canvas"])
+        self.settings_manager = SettingsManager()
+        self.parsed_data = None
+        self.archive_password = None
+        self._parsing = False
+        self.active_view = "overview"
+        self.search_var = ctk.StringVar()
+        self.show_secrets_var = ctk.BooleanVar(value=False)
+        self.card_values = {}
+        self.nav_buttons = {}
+        self._build_layout()
+        self.bind_shortcuts()
+        self.refresh_dashboard()
+        self.select_view("overview")
 
-# -------------------------------------
-# Parsed Data Viewer with Filter & Context
-# -------------------------------------
-class ParsedDataViewer(Toplevel):
-    def __init__(self, master, parsed_data):
-        super().__init__(master)
-        self.title("Parsed Log Data")
-        self.geometry("800x600")
-        self.parsed_data = parsed_data
-        self.create_widgets()
-    
-    def create_widgets(self):
-        filter_frame = ctk.CTkFrame(self)
-        filter_frame.pack(fill="x", padx=10, pady=5)
-        filter_label = ctk.CTkLabel(filter_frame, text="Filter:")
-        filter_label.grid(row=0, column=0, padx=5, pady=5)
-        self.filter_var = ctk.StringVar()
-        filter_entry = ctk.CTkEntry(filter_frame, textvariable=self.filter_var)
-        filter_entry.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
-        filter_frame.columnconfigure(1, weight=1)
-        filter_button = ctk.CTkButton(filter_frame, text="Apply Filter", command=self.apply_filter)
-        filter_button.grid(row=0, column=2, padx=5, pady=5)
-        Tooltip(filter_entry, "Type text to filter entries (case-insensitive)")
-        Tooltip(filter_button, "Click to filter the displayed data")
-        
-        tree_frame = ctk.CTkFrame(self)
-        tree_frame.pack(fill="both", expand=True, padx=10, pady=5)
-        self.tree = ttk.Treeview(tree_frame)
-        self.tree["columns"] = ("Detail",)
-        self.tree.column("#0", width=150, minwidth=150)
-        self.tree.column("Detail", width=600, minwidth=200)
-        self.tree.heading("#0", text="Category", anchor="w")
-        self.tree.heading("Detail", text="Detail", anchor="w")
-        self.tree.pack(fill="both", expand=True, side="left")
-        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=vsb.set)
-        vsb.pack(side="right", fill="y")
+    def _build_layout(self):
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+        self._build_sidebar()
+        self._build_main()
+
+    def _build_sidebar(self):
+        sidebar = ctk.CTkFrame(self, width=232, corner_radius=0, fg_color=COLORS["nav"])
+        sidebar.grid(row=0, column=0, sticky="nsew")
+        sidebar.grid_propagate(False)
+        ctk.CTkLabel(sidebar, text="STEALERSCOPE", text_color="white",
+                     font=ctk.CTkFont(size=22, weight="bold")).pack(anchor="w", padx=22, pady=(26, 2))
+        ctk.CTkLabel(sidebar, text="FORENSIC LOG ANALYZER", text_color="#98a2b3",
+                     font=ctk.CTkFont(size=11, weight="bold")).pack(anchor="w", padx=22, pady=(0, 24))
+
+        for key, label in self.NAV_ITEMS:
+            button = ctk.CTkButton(sidebar, text=label, anchor="w", height=42,
+                                   fg_color="transparent", hover_color=COLORS["nav_hover"],
+                                   command=lambda value=key: self.select_view(value))
+            button.pack(fill="x", padx=12, pady=2)
+            self.nav_buttons[key] = button
+
+        ctk.CTkFrame(sidebar, height=1, fg_color="#344054").pack(fill="x", padx=18, pady=20)
+        self.import_logs_button = ctk.CTkButton(sidebar, text="Import Archive", height=40,
+                                                command=self.import_logs)
+        self.import_logs_button.pack(fill="x", padx=16, pady=4)
+        self.import_folder_button = ctk.CTkButton(sidebar, text="Import Folder", height=40,
+                                                  fg_color="#344054", hover_color="#475467",
+                                                  command=self.import_folder)
+        self.import_folder_button.pack(fill="x", padx=16, pady=4)
+        self.parse_button = ctk.CTkButton(sidebar, text="Analyze Evidence", height=42,
+                                          fg_color=COLORS["green"], hover_color="#067647",
+                                          command=self.run_log_parser)
+        self.parse_button.pack(fill="x", padx=16, pady=(14, 4))
+        self.settings_button = ctk.CTkButton(sidebar, text="Settings", height=38,
+                                             fg_color="transparent", border_width=1,
+                                             border_color="#475467", command=self.open_settings)
+        self.settings_button.pack(fill="x", padx=16, pady=4)
+
+        self.input_label = ctk.CTkLabel(sidebar, text="No evidence selected", wraplength=190,
+                                        justify="left", text_color="#98a2b3", font=ctk.CTkFont(size=11))
+        self.input_label.pack(side="bottom", anchor="w", padx=20, pady=22)
+
+    def _build_main(self):
+        main = ctk.CTkFrame(self, fg_color="transparent", corner_radius=0)
+        main.grid(row=0, column=1, sticky="nsew", padx=24, pady=18)
+        main.grid_columnconfigure(0, weight=1)
+        main.grid_rowconfigure(3, weight=1)
+
+        header = ctk.CTkFrame(main, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", pady=(2, 14))
+        header.grid_columnconfigure(0, weight=1)
+        self.page_title = ctk.CTkLabel(header, text="Investigation Overview", anchor="w",
+                                       text_color=COLORS["text"], font=ctk.CTkFont(size=25, weight="bold"))
+        self.page_title.grid(row=0, column=0, sticky="w")
+        self.case_label = ctk.CTkLabel(header, text="No active case", text_color=COLORS["muted"])
+        self.case_label.grid(row=1, column=0, sticky="w", pady=(2, 0))
+        ctk.CTkButton(header, text="Generate Report", width=132, command=self.generate_report).grid(row=0, column=1, rowspan=2, padx=6)
+        ctk.CTkButton(header, text="Export JSON", width=110, fg_color="#344054",
+                      hover_color="#475467", command=self.export_data).grid(row=0, column=2, rowspan=2)
+
+        cards = ctk.CTkFrame(main, fg_color="transparent")
+        cards.grid(row=1, column=0, sticky="ew")
+        for column in range(6): cards.grid_columnconfigure(column, weight=1)
+        specs = (("credentials", "Credentials", COLORS["blue"]), ("cookies", "Cookies", "#7f56d9"),
+                 ("detected_domains", "Domains", COLORS["green"]), ("system_records", "Systems", "#0891b2"),
+                 ("source_files", "Files", COLORS["amber"]), ("warnings", "Warnings", COLORS["red"]))
+        for column, (key, label, accent) in enumerate(specs):
+            card = ctk.CTkFrame(cards, fg_color=COLORS["surface"], border_width=1,
+                                border_color=COLORS["border"], corner_radius=10)
+            card.grid(row=0, column=column, sticky="ew", padx=(0 if column == 0 else 5, 0 if column == 5 else 5))
+            ctk.CTkFrame(card, width=4, height=60, fg_color=accent, corner_radius=4).pack(side="left", padx=(10, 8), pady=13)
+            body = ctk.CTkFrame(card, fg_color="transparent")
+            body.pack(side="left", pady=11)
+            value = ctk.CTkLabel(body, text="0", anchor="w", text_color=COLORS["text"],
+                                 font=ctk.CTkFont(size=23, weight="bold"))
+            value.pack(anchor="w")
+            ctk.CTkLabel(body, text=label, text_color=COLORS["muted"], font=ctk.CTkFont(size=11)).pack(anchor="w")
+            self.card_values[key] = value
+
+        tools = ctk.CTkFrame(main, fg_color="transparent")
+        tools.grid(row=2, column=0, sticky="ew", pady=(16, 9))
+        tools.grid_columnconfigure(0, weight=1)
+        search = ctk.CTkEntry(tools, textvariable=self.search_var,
+                              placeholder_text="Search current view…", height=38)
+        search.grid(row=0, column=0, sticky="ew", padx=(0, 10))
+        search.bind("<KeyRelease>", lambda _event: self.refresh_table())
+        self.secret_switch = ctk.CTkSwitch(tools, text="Reveal secrets", variable=self.show_secrets_var,
+                                           command=self.refresh_table)
+        self.secret_switch.grid(row=0, column=1, padx=8)
+
+        panel = ctk.CTkFrame(main, fg_color=COLORS["surface"], border_width=1,
+                             border_color=COLORS["border"], corner_radius=10)
+        panel.grid(row=3, column=0, sticky="nsew")
+        panel.grid_columnconfigure(0, weight=1)
+        panel.grid_rowconfigure(1, weight=1)
+        self.panel_title = ctk.CTkLabel(panel, text="Overview", anchor="w", text_color=COLORS["text"],
+                                        font=ctk.CTkFont(size=16, weight="bold"))
+        self.panel_title.grid(row=0, column=0, sticky="ew", padx=18, pady=(14, 10))
+        table_frame = tk.Frame(panel, bg="white")
+        table_frame.grid(row=1, column=0, sticky="nsew", padx=14, pady=(0, 14))
+        self.tree = ttk.Treeview(table_frame, show="headings")
+        self.tree.pack(side="left", fill="both", expand=True)
+        scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
+        scrollbar.pack(side="right", fill="y")
+        self.tree.configure(yscrollcommand=scrollbar.set)
         self.tree.bind("<Button-3>", self.show_context_menu)
-        self.populate_tree()
-    
-    def populate_tree(self):
+
+        footer = ctk.CTkFrame(main, fg_color="transparent")
+        footer.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        footer.grid_columnconfigure(0, weight=1)
+        self.status_var = ctk.StringVar(value="Ready")
+        ctk.CTkLabel(footer, textvariable=self.status_var, text_color=COLORS["muted"]).grid(row=0, column=0, sticky="w")
+        self.progress = ctk.CTkProgressBar(footer, width=180, mode="indeterminate")
+        self.progress.grid(row=0, column=1, sticky="e")
+        self.progress.grid_remove()
+
+    def bind_shortcuts(self):
+        self.bind("<Control-p>", lambda _event: self.run_log_parser())
+        self.bind("<Control-r>", lambda _event: self.generate_report())
+        self.bind("<Control-e>", lambda _event: self.export_data())
+        self.bind("<Control-s>", lambda _event: self.open_settings())
+
+    def select_view(self, view):
+        self.active_view = view
+        names = dict(self.NAV_ITEMS)
+        self.page_title.configure(text="Investigation " + names[view])
+        self.panel_title.configure(text=names[view])
+        self.secret_switch.grid() if view in ("credentials", "cookies") else self.secret_switch.grid_remove()
+        for key, button in self.nav_buttons.items():
+            button.configure(fg_color=COLORS["nav_hover"] if key == view else "transparent")
+        self.refresh_table()
+
+    def _set_table(self, columns, rows):
         self.tree.delete(*self.tree.get_children())
-        for category, entries in self.parsed_data.items():
-            parent_id = self.tree.insert("", "end", text=category, values=("",))
-            if isinstance(entries, list):
-                for entry in entries:
-                    if isinstance(entry, dict):
-                        details = ", ".join([f"{k}: {v}" for k, v in entry.items()])
-                    else:
-                        details = str(entry)
-                    self.tree.insert(parent_id, "end", text="", values=(details,))
-            elif isinstance(entries, dict):
-                for key, value in entries.items():
-                    self.tree.insert(parent_id, "end", text=key, values=(value,))
-    
-    def apply_filter(self):
-        term = self.filter_var.get().lower().strip()
-        self.tree.delete(*self.tree.get_children())
-        for category, entries in self.parsed_data.items():
-            filtered_entries = []
-            if isinstance(entries, list):
-                for entry in entries:
-                    text = ""
-                    if isinstance(entry, dict):
-                        text = ", ".join([f"{k}: {v}" for k, v in entry.items()])
-                    else:
-                        text = str(entry)
-                    if term in text.lower():
-                        filtered_entries.append(text)
-            elif isinstance(entries, dict):
-                filtered_entries = [(k, v) for k, v in entries.items() if term in k.lower() or term in str(v).lower()]
-            if filtered_entries:
-                parent_id = self.tree.insert("", "end", text=category, values=("",))
-                if isinstance(entries, list):
-                    for text in filtered_entries:
-                        self.tree.insert(parent_id, "end", text="", values=(text,))
-                else:
-                    for k, v in filtered_entries:
-                        self.tree.insert(parent_id, "end", text=k, values=(v,))
-    
+        self.tree["columns"] = tuple(key for key, _ in columns)
+        for key, label in columns:
+            self.tree.heading(key, text=label, anchor="w")
+            self.tree.column(key, anchor="w", width=150, minwidth=80, stretch=True)
+        for row in rows:
+            self.tree.insert("", "end", values=row)
+
+    def refresh_dashboard(self):
+        data = self.parsed_data or {}
+        for key, label in self.card_values.items():
+            value = data.get(key, [])
+            label.configure(text=str(len(value) if isinstance(value, (list, dict)) else 0))
+        metadata = data.get("case_metadata", {})
+        case_bits = [value for value in (metadata.get("case_id"), metadata.get("evidence_number")) if value]
+        self.case_label.configure(text=" • ".join(case_bits) if case_bits else "No active case")
+        self.refresh_table()
+
+    def refresh_table(self):
+        data = self.parsed_data or {}
+        term = self.search_var.get().casefold().strip()
+        reveal = self.show_secrets_var.get()
+        view = self.active_view
+        if view == "overview":
+            summary = data.get("import_summary", {})
+            assessment = data.get("family_assessment", {})
+            metadata = data.get("case_metadata", {})
+            rows = [
+                ("Input", metadata.get("input_name", "No evidence selected"), metadata.get("input_sha256") or "—"),
+                ("Import coverage", f"{summary.get('parsed', 0)} parsed / {summary.get('files_enumerated', 0)} files",
+                 f"{summary.get('partial', 0)} partial, {summary.get('failed', 0)} failed"),
+                ("Family assessment", assessment.get("status", "unknown"), assessment.get("reason", "No analysis loaded")),
+                ("Processing", metadata.get("processed_utc", "—"), metadata.get("tool_version", "—")),
+            ]
+            rows.extend(("Family indicator", item.get("candidate", ""),
+                         f"{item.get('source', '')}:{item.get('line', '')}")
+                        for item in assessment.get("evidence", []))
+            self._set_table((("item", "Summary"), ("value", "Value"), ("detail", "Detail")), self._filtered(rows, term))
+        elif view == "credentials":
+            rows = [(r.get("soft", ""), r.get("url", ""), r.get("username", ""),
+                     r.get("password", "") if reveal else self._mask(r.get("password", "")),
+                     r.get("source", ""), r.get("source_line", "")) for r in data.get("credentials", [])]
+            self._set_table((("app", "Application"), ("url", "URL / Host"), ("user", "Username"),
+                             ("password", "Password"), ("source", "Source"), ("line", "Line")), self._filtered(rows, term))
+        elif view == "cookies":
+            rows = [(r.get("domain", ""), r.get("name", ""), r.get("value", "") if reveal else self._mask(r.get("value", "")),
+                     r.get("expires_epoch", ""), r.get("source", "")) for r in data.get("cookies", [])]
+            self._set_table((("domain", "Domain"), ("name", "Name"), ("value", "Value"),
+                             ("expires", "Expires"), ("source", "Source")), self._filtered(rows, term))
+        elif view == "system_records":
+            rows = [(r.get("source", ""), key, value) for r in data.get("system_records", [])
+                    for key, value in r.get("fields", {}).items()]
+            self._set_table((("source", "Source"), ("field", "Field"), ("value", "Value")), self._filtered(rows, term))
+        elif view == "host_artifacts":
+            rows = [("Domain", value, "") for value in data.get("detected_domains", [])]
+            rows += [("Process", value, "") for value in data.get("processes", [])]
+            rows += [("Installed software", value, "") for value in data.get("installed_software", [])]
+            self._set_table((("category", "Category"), ("value", "Artifact"), ("detail", "Detail")), self._filtered(rows, term))
+        elif view == "source_files":
+            rows = [(r.get("relative_path", r.get("source", "")), r.get("status", ""),
+                     r.get("detection", {}).get("format", ""), r.get("records_parsed", 0),
+                     r.get("size_bytes", ""), r.get("sha256", "")) for r in data.get("source_files", [])]
+            self._set_table((("path", "File"), ("status", "Status"), ("format", "Detected Format"),
+                             ("records", "Records"), ("size", "Bytes"), ("hash", "SHA-256")), self._filtered(rows, term))
+        else:
+            rows = [(r.get("source", ""), r.get("line", ""), r.get("message", "")) for r in data.get("warnings", [])]
+            self._set_table((("source", "Source"), ("line", "Line"), ("message", "Warning")), self._filtered(rows, term))
+
+    @staticmethod
+    def _filtered(rows, term):
+        return rows if not term else [row for row in rows if term in " ".join(map(str, row)).casefold()]
+
+    @staticmethod
+    def _mask(value):
+        return "•" * min(max(len(str(value)), 8), 20) if value != "" else ""
+
     def show_context_menu(self, event):
         item = self.tree.identify_row(event.y)
         if item:
+            self.tree.selection_set(item)
             menu = tk.Menu(self, tearoff=0)
-            menu.add_command(label="Copy Detail", command=lambda: self.copy_detail(item))
+            menu.add_command(label="Copy row", command=lambda: self.copy_detail(item))
             menu.tk_popup(event.x_root, event.y_root)
-    
+
     def copy_detail(self, item):
-        detail = self.tree.item(item, "values")[0]
         self.clipboard_clear()
-        self.clipboard_append(detail)
-        messagebox.showinfo("Copied", "Detail copied to clipboard.")
-
-# -------------------------------------
-# Main GUI Class
-# -------------------------------------
-class StealerScopeGUI(ctk.CTk):
-    def __init__(self):
-        super().__init__()
-        self.title("StealerScope - Infostealer Log Analyzer")
-        self.geometry("900x700")
-        ctk.set_appearance_mode("light")
-        ctk.set_default_color_theme("blue")
-        self.settings_manager = SettingsManager()
-        self.config = self.settings_manager.get_all()
-        self.font_size = int(self.settings_manager.get("SETTINGS", "font_size", fallback="12"))
-        
-        top_frame = ctk.CTkFrame(self)
-        top_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=10)
-        top_frame.columnconfigure((0,1,2,3,4,5), weight=1)
-        
-        self.settings_button = ctk.CTkButton(top_frame, text="⚙️ Settings", command=self.open_settings)
-        self.settings_button.grid(row=0, column=0, padx=5)
-        Tooltip(self.settings_button, "Open settings window")
-        
-        self.import_logs_button = ctk.CTkButton(top_frame, text="📂 Import Logs", command=self.import_logs)
-        self.import_logs_button.grid(row=0, column=1, padx=5)
-        Tooltip(self.import_logs_button, "Select an archive or extracted log folder")
-        
-        self.parse_button = ctk.CTkButton(top_frame, text="🔍 Parse Logs", command=self.run_log_parser)
-        self.parse_button.grid(row=0, column=2, padx=5)
-        Tooltip(self.parse_button, "Parse the selected logs")
-        
-        self.report_button = ctk.CTkButton(top_frame, text="📄 Generate Report", command=self.generate_report)
-        self.report_button.grid(row=0, column=3, padx=5)
-        Tooltip(self.report_button, "Generate a PDF report")
-        
-        self.export_button = ctk.CTkButton(top_frame, text="📜 Export Data", command=self.export_data)
-        self.export_button.grid(row=0, column=4, padx=5)
-        Tooltip(self.export_button, "Export parsed data to JSON")
-        
-        self.view_data_button = ctk.CTkButton(top_frame, text="🔎 View Parsed Data", command=self.view_parsed_data)
-        self.view_data_button.grid(row=0, column=5, padx=5)
-        Tooltip(self.view_data_button, "View parsed data in a structured tree")
-        
-        self.log_viewer = ctk.CTkTextbox(self, wrap="word", font=("Consolas", self.font_size), state="disabled")
-        self.log_viewer.grid(row=1, column=0, sticky="nsew", padx=10, pady=5)
-        
-        self.status_var = ctk.StringVar(value="Ready")
-        self.status_bar = ctk.CTkLabel(self, textvariable=self.status_var, anchor="w")
-        self.status_bar.grid(row=2, column=0, sticky="ew", padx=10, pady=5)
-        
-        self.grid_rowconfigure(1, weight=1)
-        self.grid_columnconfigure(0, weight=1)
-        
-        self.insert_log("🔹 Log output will be displayed here...")
-        self._parsing = False
-        self.archive_password = None
-        self.bind_shortcuts()
-
-    def bind_shortcuts(self):
-        self.bind("<Control-p>", lambda event: self.run_log_parser())
-        self.bind("<Control-r>", lambda event: self.generate_report())
-        self.bind("<Control-e>", lambda event: self.export_data())
-        self.bind("<Control-s>", lambda event: self.open_settings())
+        self.clipboard_append("\t".join(map(str, self.tree.item(item, "values"))))
 
     def open_settings(self):
-        settings_window = ctk.CTkToplevel(self)
-        settings_window.title("Settings")
-        settings_window.geometry("600x550")
-        
-        tab_view = ctk.CTkTabview(settings_window, width=580, height=400)
-        tab_view.pack(pady=10, padx=10)
-        
-        tab_view.add("General")
-        tab_view.add("API Keys")
-        tab_view.add("Alerts")
-        tab_view.add("Paths")
-        tab_view.add("Case")
-        
-        # General Tab
-        general_frame = tab_view.tab("General")
-        auto_update = self.settings_manager.get("SETTINGS", "auto_update", fallback="True") == "True"
-        self.auto_update_var = ctk.BooleanVar(value=auto_update)
-        auto_update_checkbox = ctk.CTkCheckBox(general_frame, text="Auto Update", variable=self.auto_update_var)
-        auto_update_checkbox.grid(row=0, column=0, padx=10, pady=10, sticky="w")
-        
-        dark_mode = self.settings_manager.get("SETTINGS", "dark_mode", fallback="light")
-        self.dark_mode_var = ctk.StringVar(value=dark_mode)
-        dark_mode_label = ctk.CTkLabel(general_frame, text="Theme Mode:")
-        dark_mode_label.grid(row=1, column=0, padx=10, pady=5, sticky="w")
-        dark_mode_option = ctk.CTkOptionMenu(general_frame, variable=self.dark_mode_var, values=["light", "dark"])
-        dark_mode_option.grid(row=1, column=1, padx=10, pady=5, sticky="w")
-        
-        font_size = self.settings_manager.get("SETTINGS", "font_size", fallback="12")
-        self.font_size_var = ctk.StringVar(value=font_size)
-        font_size_label = ctk.CTkLabel(general_frame, text="Font Size:")
-        font_size_label.grid(row=2, column=0, padx=10, pady=5, sticky="w")
-        font_size_entry = ctk.CTkEntry(general_frame, textvariable=self.font_size_var, width=80)
-        font_size_entry.grid(row=2, column=1, padx=10, pady=5, sticky="w")
-        
-        # API Keys Tab
-        api_keys_frame = tab_view.tab("API Keys")
-        hibp_api_key = self.settings_manager.get("API_KEYS", "hibp_api_key", fallback="your_hibp_api_key_here")
-        self.hibp_api_key_var = ctk.StringVar(value=hibp_api_key)
-        virus_api_key = self.settings_manager.get("API_KEYS", "virustotal_api_key", fallback="your_virustotal_api_key_here")
-        self.virus_api_key_var = ctk.StringVar(value=virus_api_key)
-        hibp_label = ctk.CTkLabel(api_keys_frame, text="HIBP API Key:")
-        hibp_label.grid(row=0, column=0, padx=10, pady=5, sticky="w")
-        hibp_entry = ctk.CTkEntry(api_keys_frame, textvariable=self.hibp_api_key_var, width=400)
-        hibp_entry.grid(row=0, column=1, padx=10, pady=5)
-        virus_label = ctk.CTkLabel(api_keys_frame, text="VirusTotal API Key:")
-        virus_label.grid(row=1, column=0, padx=10, pady=5, sticky="w")
-        virus_entry = ctk.CTkEntry(api_keys_frame, textvariable=self.virus_api_key_var, width=400)
-        virus_entry.grid(row=1, column=1, padx=10, pady=5)
-        
-        # Alerts Tab
-        alerts_frame = tab_view.tab("Alerts")
-        email_alerts = self.settings_manager.get("ALERTS", "email_alerts", fallback="True") == "True"
-        self.email_alerts_var = ctk.BooleanVar(value=email_alerts)
-        email_alerts_checkbox = ctk.CTkCheckBox(alerts_frame, text="Email Alerts", variable=self.email_alerts_var)
-        email_alerts_checkbox.grid(row=0, column=0, padx=10, pady=5, sticky="w")
-        desktop_alerts = self.settings_manager.get("ALERTS", "desktop_alerts", fallback="True") == "True"
-        self.desktop_alerts_var = ctk.BooleanVar(value=desktop_alerts)
-        desktop_alerts_checkbox = ctk.CTkCheckBox(alerts_frame, text="Desktop Alerts", variable=self.desktop_alerts_var)
-        desktop_alerts_checkbox.grid(row=0, column=1, padx=10, pady=5, sticky="w")
-        email_recipient = self.settings_manager.get("ALERTS", "email_recipient", fallback="securityteam@example.com")
-        self.email_recipient_var = ctk.StringVar(value=email_recipient)
-        email_recipient_label = ctk.CTkLabel(alerts_frame, text="Email Recipient:")
-        email_recipient_label.grid(row=1, column=0, padx=10, pady=5, sticky="w")
-        email_recipient_entry = ctk.CTkEntry(alerts_frame, textvariable=self.email_recipient_var, width=400)
-        email_recipient_entry.grid(row=1, column=1, padx=10, pady=5)
-        smtp_server = self.settings_manager.get("ALERTS", "smtp_server", fallback="smtp.gmail.com")
-        self.smtp_server_var = ctk.StringVar(value=smtp_server)
-        smtp_server_label = ctk.CTkLabel(alerts_frame, text="SMTP Server:")
-        smtp_server_label.grid(row=2, column=0, padx=10, pady=5, sticky="w")
-        smtp_server_entry = ctk.CTkEntry(alerts_frame, textvariable=self.smtp_server_var, width=400)
-        smtp_server_entry.grid(row=2, column=1, padx=10, pady=5)
-        smtp_port = self.settings_manager.get("ALERTS", "smtp_port", fallback="465")
-        self.smtp_port_var = ctk.StringVar(value=smtp_port)
-        smtp_port_label = ctk.CTkLabel(alerts_frame, text="SMTP Port:")
-        smtp_port_label.grid(row=3, column=0, padx=10, pady=5, sticky="w")
-        smtp_port_entry = ctk.CTkEntry(alerts_frame, textvariable=self.smtp_port_var, width=400)
-        smtp_port_entry.grid(row=3, column=1, padx=10, pady=5)
-        smtp_username = self.settings_manager.get("ALERTS", "smtp_username", fallback="your-email@example.com")
-        self.smtp_username_var = ctk.StringVar(value=smtp_username)
-        smtp_username_label = ctk.CTkLabel(alerts_frame, text="SMTP Username:")
-        smtp_username_label.grid(row=4, column=0, padx=10, pady=5, sticky="w")
-        smtp_username_entry = ctk.CTkEntry(alerts_frame, textvariable=self.smtp_username_var, width=400)
-        smtp_username_entry.grid(row=4, column=1, padx=10, pady=5)
-        smtp_password = self.settings_manager.get("ALERTS", "smtp_password", fallback="your-password")
-        self.smtp_password_var = ctk.StringVar(value=smtp_password)
-        smtp_password_label = ctk.CTkLabel(alerts_frame, text="SMTP Password:")
-        smtp_password_label.grid(row=5, column=0, padx=10, pady=5, sticky="w")
-        smtp_password_entry = ctk.CTkEntry(alerts_frame, textvariable=self.smtp_password_var, width=400, show="*")
-        smtp_password_entry.grid(row=5, column=1, padx=10, pady=5)
-        
-        # Paths Tab
-        paths_frame = tab_view.tab("Paths")
-        log_folder = self.settings_manager.get("PATHS", "log_folder", fallback="logs/")
-        self.log_folder_var = ctk.StringVar(value=log_folder)
-        log_folder_label = ctk.CTkLabel(paths_frame, text="Input Path:")
-        log_folder_label.grid(row=0, column=0, padx=10, pady=5, sticky="w")
-        log_folder_entry = ctk.CTkEntry(paths_frame, textvariable=self.log_folder_var, width=400)
-        log_folder_entry.grid(row=0, column=1, padx=10, pady=5)
-        browse_button = ctk.CTkButton(paths_frame, text="Browse", command=self.browse_folder)
-        browse_button.grid(row=0, column=2, padx=10, pady=5)
+        window = ctk.CTkToplevel(self)
+        window.title("StealerScope Settings")
+        window.geometry("620x430")
+        tabs = ctk.CTkTabview(window, width=580, height=330)
+        tabs.pack(fill="both", expand=True, padx=16, pady=14)
+        for name in ("Case", "Appearance", "Input"):
+            tabs.add(name)
+        fields = (
+            ("case_id", "Case ID"), ("examiner", "Examiner"),
+            ("evidence_number", "Evidence Number"),
+        )
+        variables = {}
+        case_tab = tabs.tab("Case")
+        for row, (key, label) in enumerate(fields):
+            variables[key] = ctk.StringVar(value=self.settings_manager.get("CASE", key, fallback=""))
+            ctk.CTkLabel(case_tab, text=label).grid(row=row, column=0, sticky="w", padx=12, pady=10)
+            ctk.CTkEntry(case_tab, textvariable=variables[key], width=350).grid(row=row, column=1, padx=12, pady=10)
+        appearance = tabs.tab("Appearance")
+        theme = ctk.StringVar(value=self.settings_manager.get("SETTINGS", "dark_mode", fallback="light"))
+        ctk.CTkLabel(appearance, text="Theme").grid(row=0, column=0, padx=12, pady=12)
+        ctk.CTkOptionMenu(appearance, variable=theme, values=["light", "dark", "system"]).grid(row=0, column=1, padx=12)
+        input_tab = tabs.tab("Input")
+        input_var = ctk.StringVar(value=self.settings_manager.get("PATHS", "log_folder", fallback=""))
+        ctk.CTkLabel(input_tab, text="Current input").grid(row=0, column=0, padx=12, pady=12)
+        ctk.CTkEntry(input_tab, textvariable=input_var, width=400).grid(row=0, column=1, padx=12)
 
-        case_frame = tab_view.tab("Case")
-        self.case_id_var = ctk.StringVar(value=self.settings_manager.get("CASE", "case_id", fallback=""))
-        self.examiner_var = ctk.StringVar(value=self.settings_manager.get("CASE", "examiner", fallback=""))
-        self.evidence_number_var = ctk.StringVar(value=self.settings_manager.get("CASE", "evidence_number", fallback=""))
-        for row, (label_text, variable) in enumerate((
-                ("Case ID:", self.case_id_var), ("Examiner:", self.examiner_var),
-                ("Evidence Number:", self.evidence_number_var))):
-            ctk.CTkLabel(case_frame, text=label_text).grid(row=row, column=0, padx=10, pady=8, sticky="w")
-            ctk.CTkEntry(case_frame, textvariable=variable, width=360).grid(row=row, column=1, padx=10, pady=8)
+        def save():
+            for key, variable in variables.items():
+                self.settings_manager.set("CASE", key, variable.get())
+            self.settings_manager.set("SETTINGS", "dark_mode", theme.get())
+            self.settings_manager.set("PATHS", "log_folder", input_var.get())
+            ctk.set_appearance_mode(theme.get())
+            window.destroy()
+        ctk.CTkButton(window, text="Save Settings", command=save).pack(pady=(0, 14))
 
-        def save_settings():
-            self.settings_manager.set("SETTINGS", "auto_update", self.auto_update_var.get())
-            self.settings_manager.set("SETTINGS", "dark_mode", self.dark_mode_var.get())
-            self.settings_manager.set("SETTINGS", "font_size", self.font_size_var.get())
-            self.settings_manager.set("API_KEYS", "hibp_api_key", self.hibp_api_key_var.get())
-            self.settings_manager.set("API_KEYS", "virustotal_api_key", self.virus_api_key_var.get())
-            self.settings_manager.set("ALERTS", "email_alerts", self.email_alerts_var.get())
-            self.settings_manager.set("ALERTS", "desktop_alerts", self.desktop_alerts_var.get())
-            self.settings_manager.set("ALERTS", "email_recipient", self.email_recipient_var.get())
-            self.settings_manager.set("ALERTS", "smtp_server", self.smtp_server_var.get())
-            self.settings_manager.set("ALERTS", "smtp_port", self.smtp_port_var.get())
-            self.settings_manager.set("ALERTS", "smtp_username", self.smtp_username_var.get())
-            self.settings_manager.set("ALERTS", "smtp_password", self.smtp_password_var.get())
-            self.settings_manager.set("PATHS", "log_folder", self.log_folder_var.get())
-            self.settings_manager.set("CASE", "case_id", self.case_id_var.get())
-            self.settings_manager.set("CASE", "examiner", self.examiner_var.get())
-            self.settings_manager.set("CASE", "evidence_number", self.evidence_number_var.get())
-            self.insert_log("✅ Settings saved successfully.")
-            ctk.set_appearance_mode(self.dark_mode_var.get())
-            self.font_size = int(self.font_size_var.get())
-            self.log_viewer.configure(font=("Consolas", self.font_size))
-            settings_window.destroy()
-        
-        save_button = ctk.CTkButton(settings_window, text="Save Settings", command=save_settings)
-        save_button.pack(pady=10)
-        cancel_button = ctk.CTkButton(settings_window, text="Cancel", command=settings_window.destroy)
-        cancel_button.pack(pady=5)
-
-    def browse_folder(self):
-        folder = filedialog.askdirectory()
-        if folder:
-            self.log_folder_var.set(folder)
-            self.archive_password = None
-    
     def import_logs(self):
-        selected = filedialog.askopenfilename(
-            title="Select Infostealer Archive",
+        selected = filedialog.askopenfilename(title="Select Infostealer Archive",
             filetypes=[("Supported archives", "*.zip *.7z *.rar"), ("All files", "*.*")])
         if selected:
-            self.archive_password = simpledialog.askstring(
-                "Archive Password", "Enter the archive password, or leave blank if none:",
-                show="*", parent=self)
+            self.archive_password = simpledialog.askstring("Archive Password",
+                "Enter the archive password, or leave blank if none:", show="*", parent=self)
             self.settings_manager.set("PATHS", "log_folder", selected)
-            self.insert_log(f"Archive selected: {selected}")
-            return
-        folder = filedialog.askdirectory(title="Or Select an Extracted Log Folder")
+            self.input_label.configure(text=selected)
+            self.status_var.set("Archive selected — ready to analyze")
+
+    def import_folder(self):
+        folder = filedialog.askdirectory(title="Select Extracted Log Folder")
         if folder:
             self.archive_password = None
             self.settings_manager.set("PATHS", "log_folder", folder)
-            self.insert_log(f"Log folder selected: {folder}")
-    
+            self.input_label.configure(text=folder)
+            self.status_var.set("Folder selected — ready to analyze")
+
     def run_log_parser(self):
         if self._parsing:
             return
@@ -381,24 +359,19 @@ class StealerScopeGUI(ctk.CTk):
         examiner = self.settings_manager.get("CASE", "examiner", fallback="")
         evidence_number = self.settings_manager.get("CASE", "evidence_number", fallback="")
         self._parsing = True
-        # A failed/new import must never leave the previous case available for export.
-        if hasattr(self, "parsed_data"):
-            del self.parsed_data
+        self.parsed_data = None
         for button in (self.parse_button, self.import_logs_button, self.settings_button):
             button.configure(state="disabled")
-        self.insert_log(f"Starting log parsing from folder: {log_folder}")
-        self.status_var.set("Parsing logs...")
-        progress = ctk.CTkProgressBar(self, width=280, mode="indeterminate")
-        progress.grid(row=3, column=0, pady=5)
-        progress.start()
+        self.status_var.set("Analyzing evidence…")
+        if hasattr(self, "progress"):
+            self.progress.grid()
+            self.progress.start()
         results = queue.Queue()
 
         def task():
             try:
-                results.put((CaseProcessor(
-                    log_folder, password=getattr(self, "archive_password", None),
-                    case_id=case_id, examiner=examiner,
-                    evidence_number=evidence_number).process(), None))
+                results.put((CaseProcessor(log_folder, password=getattr(self, "archive_password", None),
+                    case_id=case_id, examiner=examiner, evidence_number=evidence_number).process(), None))
             except Exception as error:
                 results.put((None, str(error)))
 
@@ -408,94 +381,58 @@ class StealerScopeGUI(ctk.CTk):
             except queue.Empty:
                 self.after(100, poll)
                 return
-            progress.stop()
-            progress.destroy()
+            if hasattr(self, "progress"):
+                self.progress.stop()
+                self.progress.grid_remove()
             self._parsing = False
             for button in (self.parse_button, self.import_logs_button, self.settings_button):
                 button.configure(state="normal")
             if error:
-                self.status_var.set("Parsing failed")
-                self.insert_log(f"Error during log parsing: {error}")
-                messagebox.showerror("Parsing Error", error)
+                self.status_var.set("Analysis failed")
+                messagebox.showerror("Analysis Error", error)
                 return
             self.parsed_data = parsed_data
-            metadata = parsed_data["case_metadata"]
-            self.insert_log(f"Input SHA-256: {metadata['input_sha256'] or 'directory input'}")
-            self.insert_log(f"Files inventoried: {metadata['extracted_file_count']} ({metadata['extracted_byte_count']} bytes)")
-            warning_count = len(parsed_data["warnings"])
-            self.status_var.set(f"Parsing complete — {warning_count} warning(s)")
-            for category in ("credentials", "brute_passwords", "detected_domains",
-                             "processes", "installed_software", "system_records", "cookies", "source_files"):
-                self.insert_log(f"{category.replace('_', ' ').title()}: {len(parsed_data[category])}")
             summary = parsed_data["import_summary"]
-            self.insert_log("Import coverage: " + ", ".join(
-                f"{key}: {summary[key]}" for key in
-                ("files_enumerated", "parsed", "partial", "unsupported", "skipped", "failed")))
-            assessment = parsed_data["family_assessment"]
-            self.insert_log(f"Malware family: {assessment['status']} (no confirmed attribution)")
-            if assessment["candidates"]:
-                self.insert_log("Unverified labels: " + ", ".join(assessment["candidates"]))
-            self.insert_log("View source_files for per-file formats, confidence, and supporting indicators.")
-            for warning in parsed_data["warnings"][:20]:
-                self.insert_log(f"Warning: {warning['source']}: {warning['message']}")
-            if warning_count > 20:
-                self.insert_log("Additional warnings are available in View Parsed Data and exports.")
-            self.insert_log("Open View Parsed Data to inspect records and source information.")
+            self.status_var.set(f"Analysis complete — {summary['parsed']} parsed, {summary['partial']} partial, {summary['failed']} failed")
+            self.refresh_dashboard()
+            self.select_view("overview")
 
         threading.Thread(target=task, daemon=True).start()
         self.after(100, poll)
 
     def generate_report(self):
-        if not hasattr(self, 'parsed_data'):
-            self.insert_log("❌ No parsed data available. Please run log parser first.")
+        if not self.parsed_data:
+            messagebox.showinfo("No Analysis", "Analyze evidence before generating a report.")
             return
-        file_path = filedialog.asksaveasfilename(defaultextension=".pdf",
-                                                 filetypes=[("PDF files", "*.pdf")],
-                                                 title="Save Report As")
-        if not file_path:
-            self.insert_log("⚠️ Report generation cancelled by user.")
-            return
-        self.insert_log("📄 Generating PDF report...")
-        try:
-            from report_generator import ReportGenerator
-            generator = ReportGenerator(self.parsed_data)
-            report_path = generator.generate_pdf_report(report_path=file_path)
-            self.insert_log(f"✅ Report generated successfully: {report_path}")
-        except Exception as e:
-            self.insert_log(f"❌ Error generating report: {e}")
-            messagebox.showerror("Report Error", f"An error occurred: {e}")
-    
+        path = filedialog.asksaveasfilename(defaultextension=".pdf", filetypes=[("PDF files", "*.pdf")])
+        if path:
+            try:
+                from report_generator import ReportGenerator
+                ReportGenerator(self.parsed_data).generate_pdf_report(report_path=path)
+                self.status_var.set(f"Report saved: {path}")
+            except Exception as error:
+                messagebox.showerror("Report Error", str(error))
+
     def export_data(self):
-        if not hasattr(self, 'parsed_data'):
-            self.insert_log("❌ No parsed data available. Please run log parser first.")
+        if not self.parsed_data:
+            messagebox.showinfo("No Analysis", "Analyze evidence before exporting data.")
             return
-        self.insert_log("📜 Exporting parsed data to JSON...")
-        try:
-            import json
-            output_file = filedialog.asksaveasfilename(
-                defaultextension=".json", filetypes=[("JSON files", "*.json")],
-                title="Export Parsed Data As")
-            if not output_file:
-                return
-            with open(output_file, "w", encoding="utf-8") as f:
-                json.dump(self.parsed_data, f, indent=4)
-            self.insert_log(f"✅ Data exported successfully to: {output_file}")
-        except Exception as e:
-            self.insert_log(f"❌ Error exporting data: {e}")
-            messagebox.showerror("Export Error", f"An error occurred: {e}")
-    
-    def view_parsed_data(self):
-        if not hasattr(self, 'parsed_data'):
-            self.insert_log("❌ No parsed data available. Please run log parser first.")
-            return
-        ParsedDataViewer(self, self.parsed_data)
-    
+        path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON files", "*.json")])
+        if path:
+            try:
+                with open(path, "w", encoding="utf-8") as stream:
+                    json.dump(self.parsed_data, stream, indent=2, ensure_ascii=False)
+                self.status_var.set(f"JSON exported: {path}")
+            except OSError as error:
+                messagebox.showerror("Export Error", str(error))
+
     def insert_log(self, message):
-        self.log_viewer.configure(state="normal")
-        self.log_viewer.insert("end", message + "\n")
-        self.log_viewer.configure(state="disabled")
-        self.log_viewer.see("end")
+        """Compatibility shim for callers that previously wrote to the activity log."""
+        self.status_var.set(message)
+
+    def view_parsed_data(self):
+        self.select_view("overview")
+
 
 if __name__ == "__main__":
-    app = StealerScopeGUI()
-    app.mainloop()
+    StealerScopeGUI().mainloop()

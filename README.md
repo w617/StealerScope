@@ -190,3 +190,19 @@ Install dependencies and launch:
 python -m pip install -r requirements.txt
 python main.py
 ```
+
+
+## Analysis dashboard
+
+The main window uses a persistent investigation dashboard rather than printing
+sensitive records into an activity log. Summary cards show credentials, cookies,
+domains, systems, files, and warnings. Sidebar views provide overview, credential,
+cookie, system, combined host-artifact, file-inventory, and warning tables.
+
+Search filters the current view without changing the underlying analysis. Passwords
+and cookie values are masked by default and require the **Reveal secrets** control.
+Credential rows retain their source and line, while file rows expose detection
+status, format, record count, size, and SHA-256. The overview shows import coverage,
+source hash, processing metadata, family assessment, and each family indicator with
+its source location. Archive and folder imports are separate actions, and analysis
+runs on a worker while all interface updates remain on the UI thread.

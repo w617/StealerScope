@@ -29,19 +29,20 @@ class GUIFlowTests(unittest.TestCase):
             thread = threading.Thread(**kwargs)
             threads.append(thread)
             return thread
-        progress = SimpleNamespace(**{name: ui_call for name in ("grid", "start", "stop", "destroy")})
+        progress = SimpleNamespace(**{name: ui_call for name in ("grid", "start", "stop", "grid_remove")})
         messages = Mock()
         namespace = {"queue": queue, "threading": SimpleNamespace(Thread=create_thread),
-                     "ctk": SimpleNamespace(CTkProgressBar=lambda *a, **kw: progress), "messagebox": messages}
+                     "messagebox": messages}
         method = load_method("StealerScopeGUI", "run_log_parser", namespace)
         button = SimpleNamespace(configure=ui_call)
         gui = SimpleNamespace(_parsing=False, parsed_data={"old": "case"},
                               settings_manager=SimpleNamespace(get=lambda *a, **kw: folder),
                               parse_button=button, import_logs_button=button, settings_button=button,
-                              insert_log=ui_call, status_var=SimpleNamespace(set=ui_call),
+                              insert_log=ui_call, status_var=SimpleNamespace(set=ui_call), progress=progress,
+                              refresh_dashboard=ui_call, select_view=ui_call,
                               after=lambda delay, callback: callbacks.append(callback))
         method(gui)
-        self.assertFalse(hasattr(gui, "parsed_data"))
+        self.assertIsNone(gui.parsed_data)
         method(gui)  # A second request must not start a second worker.
         self.assertEqual(len(threads), 1)
         threads[0].join(timeout=5)
@@ -59,15 +60,17 @@ class GUIFlowTests(unittest.TestCase):
     def test_failed_import_clears_previous_results(self):
         with tempfile.TemporaryDirectory() as folder:
             gui, messages = self.run_parse(str(Path(folder) / "missing"))
-        self.assertFalse(hasattr(gui, "parsed_data"))
+        self.assertIsNone(gui.parsed_data)
         messages.showerror.assert_called_once()
 
-    def test_system_filter_keeps_key_and_value(self):
-        method = load_method("ParsedDataViewer", "apply_filter", {})
-        tree = Mock()
-        tree.get_children.return_value = []
-        tree.insert.return_value = "parent"
-        gui = SimpleNamespace(filter_var=SimpleNamespace(get=lambda: "host"), tree=tree,
-                              parsed_data={"system_info": {"Host": "Device A", "OS": "Windows"}})
-        method(gui)
-        tree.insert.assert_any_call("parent", "end", text="Host", values=("Device A",))
+    def test_dashboard_filter_keeps_complete_matching_rows(self):
+        method = load_method("StealerScopeGUI", "_filtered", {})
+        rows = [("system.txt", "Host", "Device A"), ("system.txt", "OS", "Windows")]
+        self.assertEqual(method(rows, "host"), [("system.txt", "Host", "Device A")])
+        self.assertEqual(method(rows, "device a"), [("system.txt", "Host", "Device A")])
+
+    def test_secret_mask_does_not_reveal_value(self):
+        method = load_method("StealerScopeGUI", "_mask", {})
+        masked = method("SensitiveValue")
+        self.assertNotIn("SensitiveValue", masked)
+        self.assertTrue(set(masked) == {"•"})
