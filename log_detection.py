@@ -6,9 +6,14 @@ import os
 import re
 
 SAMPLE_BYTES = 65536
-LABELS = {"url": "url", "host": "url", "user": "username", "username": "username",
-          "login": "username", "pass": "password", "password": "password",
-          "soft": "soft", "browser": "soft"}
+LABELS = {
+    "url": "url", "ur1": "url", "host": "url", "hostname": "url",
+    "user": "username", "username": "username", "login": "username",
+    "user login": "username", "u53rn4m3": "username",
+    "pass": "password", "password": "password", "user password": "password",
+    "p455w0rd": "password",
+    "soft": "soft", "browser": "soft", "application": "soft", "storage": "soft",
+}
 SYSTEM_KEYS = {"host", "hostname", "computer name", "os", "operating system", "hwid",
                "username", "user name", "ip", "ip address", "country", "machine id"}
 LINE_FILES = {"brute.txt": "brute_passwords", "domaindetect.txt": "detected_domains",
@@ -61,8 +66,9 @@ def detect_file(path):
     result["family_assessment"] = family_assessment(claims)
     candidates = []
     canonical = {LABELS[key] for key in fields if key in LABELS}
-    if {"url", "username", "password"}.issubset(canonical):
-        candidates.append(("credential_blocks", "high", [{"indicator": "credential_field", "label": key,
+    if {"username", "password"}.issubset(canonical):
+        confidence = "high" if "url" in canonical else "medium"
+        candidates.append(("credential_blocks", confidence, [{"indicator": "credential_field", "label": key,
                             "line": number} for key, number in fields.items() if key in LABELS]))
     # Delimited credentials require an explicit header; bare colon-separated strings
     # are deliberately not guessed (URLs and passwords can both contain colons).
@@ -73,8 +79,10 @@ def detect_file(path):
         except csv.Error:
             continue
         mapped = [LABELS.get(value.strip().lower()) for value in header]
-        if {"url", "username", "password"}.issubset(mapped) and all(mapped.count(k) == 1 for k in ("url", "username", "password")):
-            candidates.append(("credential_table", "high", [{"indicator": "credential_table_header", "line": 1}]))
+        required_columns = ("username", "password")
+        if set(required_columns).issubset(mapped) and all(mapped.count(k) == 1 for k in required_columns):
+            confidence = "high" if mapped.count("url") == 1 else "medium"
+            candidates.append(("credential_table", confidence, [{"indicator": "credential_table_header", "line": 1}]))
             result["delimiter"] = delimiter
             break
     cookie_lines = []

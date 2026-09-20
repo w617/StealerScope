@@ -140,3 +140,20 @@ line. Repeated claims do not increase confidence. Real-world family accuracy
 cannot be claimed from the synthetic regression fixtures. An independently
 labeled, lawfully held sample corpus is required before adding and validating
 stronger family-specific signatures.
+
+### Credential compatibility
+
+Credential blocks accept these case-insensitive field aliases:
+
+- Site: `URL`, `UR1`, `Host`, `Hostname`
+- User: `User`, `Username`, `Login`, `User Login`, `U53RN4M3`
+- Password: `Pass`, `Password`, `User Password`, `P455W0RD`
+- Application: `Soft`, `Browser`, `Application`, `Storage`
+
+A username/password pair is retained when a URL is absent. Such a structural match
+has medium format confidence because it contains less identifying context. Lines
+after a password that are not recognized fields are preserved as newline-separated
+password content until a blank line, separator, or recognized field. Application
+metadata may occur before or after a credential block; a one-field lookahead assigns
+it to the adjacent record. CSV, TSV, and semicolon tables also accept credential
+pairs without a URL.
