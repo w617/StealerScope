@@ -1,0 +1,5 @@
+customtkinter
+fpdf2
+Pillow
+py7zr
+rarfile

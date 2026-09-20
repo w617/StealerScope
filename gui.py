@@ -1,5 +1,5 @@
 import customtkinter as ctk
-from tkinter import filedialog, messagebox, Toplevel
+from tkinter import filedialog, messagebox, simpledialog, Toplevel
 import threading
 import queue
 import logging
@@ -170,7 +170,7 @@ class StealerScopeGUI(ctk.CTk):
         
         self.import_logs_button = ctk.CTkButton(top_frame, text="📂 Import Logs", command=self.import_logs)
         self.import_logs_button.grid(row=0, column=1, padx=5)
-        Tooltip(self.import_logs_button, "Select a log folder")
+        Tooltip(self.import_logs_button, "Select an archive or extracted log folder")
         
         self.parse_button = ctk.CTkButton(top_frame, text="🔍 Parse Logs", command=self.run_log_parser)
         self.parse_button.grid(row=0, column=2, padx=5)
@@ -200,6 +200,7 @@ class StealerScopeGUI(ctk.CTk):
         
         self.insert_log("🔹 Log output will be displayed here...")
         self._parsing = False
+        self.archive_password = None
         self.bind_shortcuts()
 
     def bind_shortcuts(self):
@@ -220,6 +221,7 @@ class StealerScopeGUI(ctk.CTk):
         tab_view.add("API Keys")
         tab_view.add("Alerts")
         tab_view.add("Paths")
+        tab_view.add("Case")
         
         # General Tab
         general_frame = tab_view.tab("General")
@@ -302,13 +304,23 @@ class StealerScopeGUI(ctk.CTk):
         paths_frame = tab_view.tab("Paths")
         log_folder = self.settings_manager.get("PATHS", "log_folder", fallback="logs/")
         self.log_folder_var = ctk.StringVar(value=log_folder)
-        log_folder_label = ctk.CTkLabel(paths_frame, text="Log Folder:")
+        log_folder_label = ctk.CTkLabel(paths_frame, text="Input Path:")
         log_folder_label.grid(row=0, column=0, padx=10, pady=5, sticky="w")
         log_folder_entry = ctk.CTkEntry(paths_frame, textvariable=self.log_folder_var, width=400)
         log_folder_entry.grid(row=0, column=1, padx=10, pady=5)
         browse_button = ctk.CTkButton(paths_frame, text="Browse", command=self.browse_folder)
         browse_button.grid(row=0, column=2, padx=10, pady=5)
-        
+
+        case_frame = tab_view.tab("Case")
+        self.case_id_var = ctk.StringVar(value=self.settings_manager.get("CASE", "case_id", fallback=""))
+        self.examiner_var = ctk.StringVar(value=self.settings_manager.get("CASE", "examiner", fallback=""))
+        self.evidence_number_var = ctk.StringVar(value=self.settings_manager.get("CASE", "evidence_number", fallback=""))
+        for row, (label_text, variable) in enumerate((
+                ("Case ID:", self.case_id_var), ("Examiner:", self.examiner_var),
+                ("Evidence Number:", self.evidence_number_var))):
+            ctk.CTkLabel(case_frame, text=label_text).grid(row=row, column=0, padx=10, pady=8, sticky="w")
+            ctk.CTkEntry(case_frame, textvariable=variable, width=360).grid(row=row, column=1, padx=10, pady=8)
+
         def save_settings():
             self.settings_manager.set("SETTINGS", "auto_update", self.auto_update_var.get())
             self.settings_manager.set("SETTINGS", "dark_mode", self.dark_mode_var.get())
@@ -323,6 +335,9 @@ class StealerScopeGUI(ctk.CTk):
             self.settings_manager.set("ALERTS", "smtp_username", self.smtp_username_var.get())
             self.settings_manager.set("ALERTS", "smtp_password", self.smtp_password_var.get())
             self.settings_manager.set("PATHS", "log_folder", self.log_folder_var.get())
+            self.settings_manager.set("CASE", "case_id", self.case_id_var.get())
+            self.settings_manager.set("CASE", "examiner", self.examiner_var.get())
+            self.settings_manager.set("CASE", "evidence_number", self.evidence_number_var.get())
             self.insert_log("✅ Settings saved successfully.")
             ctk.set_appearance_mode(self.dark_mode_var.get())
             self.font_size = int(self.font_size_var.get())
@@ -338,18 +353,33 @@ class StealerScopeGUI(ctk.CTk):
         folder = filedialog.askdirectory()
         if folder:
             self.log_folder_var.set(folder)
+            self.archive_password = None
     
     def import_logs(self):
-        folder = filedialog.askdirectory()
+        selected = filedialog.askopenfilename(
+            title="Select Infostealer Archive",
+            filetypes=[("Supported archives", "*.zip *.7z *.rar"), ("All files", "*.*")])
+        if selected:
+            self.archive_password = simpledialog.askstring(
+                "Archive Password", "Enter the archive password, or leave blank if none:",
+                show="*", parent=self)
+            self.settings_manager.set("PATHS", "log_folder", selected)
+            self.insert_log(f"Archive selected: {selected}")
+            return
+        folder = filedialog.askdirectory(title="Or Select an Extracted Log Folder")
         if folder:
+            self.archive_password = None
             self.settings_manager.set("PATHS", "log_folder", folder)
-            self.insert_log(f"📂 Log folder set to: {folder}")
+            self.insert_log(f"Log folder selected: {folder}")
     
     def run_log_parser(self):
         if self._parsing:
             return
-        from stream_log_parser import StreamLogParser
+        from case_processor import CaseProcessor
         log_folder = self.settings_manager.get("PATHS", "log_folder", fallback="logs/")
+        case_id = self.settings_manager.get("CASE", "case_id", fallback="")
+        examiner = self.settings_manager.get("CASE", "examiner", fallback="")
+        evidence_number = self.settings_manager.get("CASE", "evidence_number", fallback="")
         self._parsing = True
         # A failed/new import must never leave the previous case available for export.
         if hasattr(self, "parsed_data"):
@@ -365,7 +395,10 @@ class StealerScopeGUI(ctk.CTk):
 
         def task():
             try:
-                results.put((StreamLogParser(log_folder).parse_logs_stream(), None))
+                results.put((CaseProcessor(
+                    log_folder, password=getattr(self, "archive_password", None),
+                    case_id=case_id, examiner=examiner,
+                    evidence_number=evidence_number).process(), None))
             except Exception as error:
                 results.put((None, str(error)))
 
@@ -386,6 +419,9 @@ class StealerScopeGUI(ctk.CTk):
                 messagebox.showerror("Parsing Error", error)
                 return
             self.parsed_data = parsed_data
+            metadata = parsed_data["case_metadata"]
+            self.insert_log(f"Input SHA-256: {metadata['input_sha256'] or 'directory input'}")
+            self.insert_log(f"Files inventoried: {metadata['extracted_file_count']} ({metadata['extracted_byte_count']} bytes)")
             warning_count = len(parsed_data["warnings"])
             self.status_var.set(f"Parsing complete — {warning_count} warning(s)")
             for category in ("credentials", "brute_passwords", "detected_domains",
