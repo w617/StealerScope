@@ -131,7 +131,7 @@ class StreamLogParser:
         reader = csv.reader((line + "\n" for _, line in self._lines(file_path)), delimiter=delimiter, strict=True)
         header = next(reader, [])
         fields = [self.LABELS.get(value.strip().lower()) for value in header]
-        required = {"url", "username", "password"}
+        required = {"username", "password"}
         if not required.issubset(fields) or any(fields.count(key) != 1 for key in required):
             self._warning(file_path, "Missing or duplicate credential table columns.", 1)
             return
@@ -172,7 +172,8 @@ class StreamLogParser:
     def stream_parse_credentials(self, file_path):
         record = {}
         start_line = None
-        required = {"url", "username", "password"}
+        pending_soft = None
+        required = {"username", "password"}
 
         def finish():
             if required.issubset(record):
@@ -184,30 +185,52 @@ class StreamLogParser:
 
         for number, line in self._lines(file_path):
             if not line.strip() or re.fullmatch(r"\s*[-=]{3,}\s*", line):
+                if pending_soft:
+                    record["soft"] = pending_soft[0]
+                    pending_soft = None
                 result = finish()
                 if result:
                     yield result
                 record, start_line = {}, None
                 continue
-            match = re.match(r"^\s*([A-Za-z]+)\s*:(.*)$", line)
-            if not match:
-                continue
-            key = self.LABELS.get(match[1].lower())
+            match = re.match(r"^\s*([^:]{1,40})\s*:(.*)$", line)
+            key = self.LABELS.get(match[1].strip().lower()) if match else None
+            if pending_soft:
+                if key in ("url", "username"):
+                    result = finish()
+                    if result:
+                        yield result
+                    record = {"soft": pending_soft[0]}
+                    start_line = pending_soft[1]
+                else:
+                    record["soft"] = pending_soft[0]
+                pending_soft = None
             if key is None:
+                # Some exports store a password over multiple physical lines. Once
+                # PASS/PASSWORD has started, preserve every non-field line verbatim
+                # until a blank line, separator, or recognized next field.
+                if "password" in record:
+                    record["password"] += "\n" + line
                 continue
-            # Repeated fields begin another record even without a blank separator.
-            if key in record or (key == "soft" and required.issubset(record)):
+            value = match[2]
+            if value.startswith(" "):
+                value = value[1:]
+            value = value if key == "password" else value.strip()
+            # Application metadata occurs both after a credential and before the
+            # next one. Defer it one line so the following field resolves ownership.
+            if key == "soft" and required.issubset(record) and "soft" not in record:
+                pending_soft = (value, number)
+                continue
+            if key in record or (required.issubset(record) and key in ("url", "username")):
                 result = finish()
                 if result:
                     yield result
                 record, start_line = {}, None
             if start_line is None:
                 start_line = number
-            value = match[2]
-            # Remove one conventional delimiter space, preserving password whitespace.
-            if value.startswith(" "):
-                value = value[1:]
-            record[key] = value if key == "password" else value.strip()
+            record[key] = value
+        if pending_soft:
+            record["soft"] = pending_soft[0]
         result = finish()
         if result:
             yield result
